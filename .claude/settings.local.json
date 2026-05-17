@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__github__get_me",
+      "Read(//d/d/Agent八股_项目_学习/OnCall/**)"
+    ]
+  }
+}
