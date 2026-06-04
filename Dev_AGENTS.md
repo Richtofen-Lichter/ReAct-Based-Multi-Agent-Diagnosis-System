@@ -872,11 +872,4 @@ Skill 系统采用文件驱动设计，新增 Skill 无需修改代码：在 `ap
 2. **图搜图** → 叠加 CLIP Embedding 实现跨模态向量检索
 
 
-### 7.5 评估体系
-
-当前缺少系统化的检索与生成质量评估。可集成：
-
-- **Ragas**：RAG 专用评估（Faithfulness, Answer Relevancy, Context Precision）
-- **自定义指标**：Hit Rate, MRR, Latency P99 等工程指标
-- **A/B 对比**：同一 query 走不同策略（Vector-Only vs Hybrid vs Hybrid+Rerank），对比 recall/precision
 
