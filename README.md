@@ -318,7 +318,57 @@ multi_agent_github/
 
 ## Benchmarks
 
-### 24 Golden Tests  + 已切分文档的离线评估(共900+条)：
+`benchmark/` 目录包含两套 RAG 离线评测集（50 题）、一个实时评测脚本和历史报告。详细使用说明见 [benchmark/README.md](benchmark/README.md)。
+
+### 评测体系
+
+| 评测模式 | 数据集 | 评测内容 |
+|---------|--------|---------|
+| Retrieval R@K | `retrieval_rk_50.jsonl` | hit@k / mrr@k / recall@k — 纯检索，不调 LLM |
+| RAGAS 端到端 | `ragas_qa_50.jsonl` | Faithfulness / Answer Relevancy / Context Precision / Context Recall |
+| OpenEvals (可选) | 同上 | Groundedness / Helpfulness — 并行 RAGAS 运行 |
+
+两个数据集各 50 条，覆盖 10 个 OnCall 高频场景（Redis / MySQL / Kubernetes / CPU & Load / 内存 / 磁盘 / Nginx / JVM / Kafka / Trace & etcd），每个场景 5 条。
+
+### 快速开始
+
+```bash
+# 前置：Docker 里的 Milvus 已启动，且已重建知识库
+docker compose up -d
+python scripts/ingest_kb_corpus.py --reset --batch 8
+
+# Retrieval R@K（推荐先跑，最快）
+python benchmark/run_benchmark.py retrieval --k 3
+
+# RAGAS 端到端（会调 LLM，较慢）
+python benchmark/run_benchmark.py ragas --limit 5
+
+# 关闭 OpenEvals，只跑 RAGAS 四项
+python benchmark/run_benchmark.py ragas --limit 5 --no-openevals
+```
+
+### A/B 对比
+
+```bash
+# 关闭 rerank 观察影响
+python benchmark/run_benchmark.py retrieval --k 3 --no-rerank
+
+# 关闭 hybrid（纯向量检索）
+python benchmark/run_benchmark.py retrieval --k 3 --no-hybrid
+
+# 只测某个场景
+python benchmark/run_benchmark.py retrieval --scenario Kafka --k 3
+```
+
+检索侧指标：
+
+- **hit@k** — top-k 是否命中任意 gold（Gold 支持 `relevant` 单组和 `relevant_groups` 多知识点组）
+- **mrr@k** — 第一个命中位置的倒数排名
+- **recall@k** — top-k 覆盖的知识点组比例
+
+### 历史数据（优化前后对比）
+
+以下数据来自一次早期的离线评估（24 题 + 954 文档），记录了 Skill-Priority 架构引入前后的效果：
 
 | 指标 | 优化前 | 优化后 |
 |------|--------|--------|
@@ -330,6 +380,8 @@ multi_agent_github/
 | RAG MRR | 0.882 | 0.938 |
 
 Token 数据来自 DeepSeek 的 `usage` 回传，并行工具数据是 5 个独立只读工具的基准测试。
+
+评测结果写入 `benchmark/reports/`，加 `--verbose` 可输出扣分原因和逐题详情。
 
 ---
 
