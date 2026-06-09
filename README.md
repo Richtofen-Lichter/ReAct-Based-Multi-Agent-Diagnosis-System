@@ -316,9 +316,22 @@ multi_agent_github/
 ## 完整的AI开发文档
   本项目90%的代码层面工作由Claude Code完成，一份详细的供大模型参考的项目文档说明必不可少，`Dev_AGENTS.md`包含了构建这个项目的所有面向AIGC的文档，可以参考以推广到其他项目的构建上
 
+## V2
+
+V2 新增 **RAG 离线评测基准集** — `benchmark/` 目录提供系统化的检索与生成质量评估能力，解决 V1 "只有印象、没有数据"的问题。
+
+核心交付：
+
+- **50 题评测数据集**：覆盖 10 个 OnCall 高频场景，每条带人工标注 gold answer 和检索 gold
+- **双模式评测脚本**：Retrieval R@K（纯检索，秒级出结果）和 RAGAS + OpenEvals（端到端，调 LLM judge）
+- **A/B 对比开关**：一键关闭 hybrid / rerank，观察各层对指标的独立贡献
+- **滚动均值输出**：逐题打印指标，跑完立即看到趋势，不用等全量跑完
+
+> `benchmark/` 目录的完整使用说明见 [benchmark/README.md](benchmark/README.md)。
+
 ## Benchmarks
 
-`benchmark/` 目录包含两套 RAG 离线评测集（50 题）、一个实时评测脚本和历史报告。详细使用说明见 [benchmark/README.md](benchmark/README.md)。
+`benchmark/` 目录包含两套 RAG 离线评测集（50 题）、一个实时评测脚本和历史报告。
 
 ### 评测体系
 
