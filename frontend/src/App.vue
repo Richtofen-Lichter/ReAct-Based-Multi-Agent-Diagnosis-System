@@ -4,6 +4,7 @@ import HealthIndicator from './components/HealthIndicator.vue'
 import AiopsTab from './components/AiopsTab.vue'
 import ChatTab from './components/ChatTab.vue'
 import DocumentsTab from './components/DocumentsTab.vue'
+import WebhookTab from './components/WebhookTab.vue'
 
 const activeTab = ref('aiops')
 </script>
@@ -36,12 +37,17 @@ const activeTab = ref('aiops')
           :class="['tab-btn', { 'tab-active': activeTab === 'documents' }]"
           @click="activeTab = 'documents'"
         >📚 知识库</button>
+        <button
+          :class="['tab-btn', { 'tab-active': activeTab === 'webhook' }]"
+          @click="activeTab = 'webhook'"
+        >📡 Webhook 诊断</button>
       </nav>
     </div>
     <div class="bg-white rounded-b-xl shadow-md p-6 min-h-[600px]">
       <AiopsTab v-show="activeTab === 'aiops'" />
       <ChatTab v-show="activeTab === 'chat'" />
       <DocumentsTab v-show="activeTab === 'documents'" />
+      <WebhookTab v-show="activeTab === 'webhook'" />
     </div>
   </div>
 

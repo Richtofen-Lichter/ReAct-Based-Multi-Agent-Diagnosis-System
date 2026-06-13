@@ -85,6 +85,14 @@
 </tr>
 </table>
 
+### 全自动诊断（Alertmanager Webhook）
+
+对接 Prometheus Alertmanager，告警来了自动走完 Skill 选择 → 计划 → 取证 → 报告全流程，无需人工介入。前端支持一键模拟告警和诊断历史回溯。
+
+<p align="center">
+  <img src="展示/Webhook.png" alt="Webhook 全自动诊断" width="90%">
+</p>
+
 ### 知识库管理
 
 支持随时上传 `.md` / `.txt` 文档，自动切分、向量化并存入 Milvus。
