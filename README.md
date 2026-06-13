@@ -68,6 +68,33 @@
 
 ---
 
+## 界面展示
+
+### AIOps 诊断
+
+从左到右：进入诊断，接收告警，Planner 拆步，Executor 执行，Replanner 评估 — 全程流式传输。
+
+<table>
+<tr>
+<td><img src="展示/AIOps.png" alt="AIOps 诊断实时过程" width="100%"></td>
+<td><img src="展示/最终报告.png" alt="最终诊断报告" width="100%"></td>
+</tr>
+<tr>
+<td align="center"><em>诊断实时过程</em></td>
+<td align="center"><em>最终诊断报告</em></td>
+</tr>
+</table>
+
+### 知识库管理
+
+支持随时上传 `.md` / `.txt` 文档，自动切分、向量化并存入 Milvus。
+
+<p align="center">
+  <img src="展示/知识库.png" alt="知识库文档上传" width="70%">
+</p>
+
+---
+
 ## Skill-Priority 流程
 
 整个诊断流程拆成 5 个节点：
