@@ -74,7 +74,7 @@ async function sendAlert() {
     const data = await post('/webhook/alertmanager', payload)
     sendResult.value = {
       ok: true,
-      message: `已触发 ${data.triggered?.length || 0} 条诊断，跳过 ${data.skipped?.length || 0} 条`,
+      message: `已入队 ${data.triggered?.length || 0} 条 Celery 任务，跳过 ${data.skipped?.length || 0} 条`,
       triggered: data.triggered || [],
       skipped: data.skipped || [],
     }
@@ -190,7 +190,10 @@ onMounted(() => {
       >
         <p class="font-medium">{{ sendResult.ok ? '✓' : '✗' }} {{ sendResult.message }}</p>
         <ul v-if="sendResult.triggered.length" class="mt-1 text-xs space-y-0.5">
-          <li v-for="sid in sendResult.triggered" :key="sid" class="font-mono">{{ sid }}</li>
+          <li v-for="t in sendResult.triggered" :key="t.task_id || t" class="font-mono">
+            <span v-if="typeof t === 'object'">{{ t.session_id }} <span class="text-slate-400">(task: {{ t.task_id?.slice(0,8) }}...)</span></span>
+            <span v-else>{{ t }}</span>
+          </li>
         </ul>
       </div>
     </div>

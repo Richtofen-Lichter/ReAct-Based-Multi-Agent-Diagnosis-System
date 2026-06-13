@@ -59,16 +59,6 @@ async def stream_diagnose(
     Yields:
         Dict[str, Any]: SSE 事件字典
     """
-    if _agent_semaphore.locked():
-        logger.warning(f"[aiops] session={session_id} | 并发已满")
-        yield _make_event(
-            "error",
-            "concurrency_limited",
-            message="当前诊断任务较多，请稍后重试",
-            max_concurrency=settings.agent_max_concurrency,
-        )
-        return
-
     async with _agent_semaphore:
         logger.info(f"[aiops] session={session_id} | query={query[:100]}...")
 

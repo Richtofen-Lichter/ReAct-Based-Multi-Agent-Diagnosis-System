@@ -1,58 +1,59 @@
-"""\u544a\u8b66 Webhook \u63a5\u6536\u63a5\u53e3 \u2014 \u5bf9\u63a5 Prometheus Alertmanager \u6807\u51c6\u534f\u8bae.
+"""告警 Webhook 接收接口 — 对接 Prometheus Alertmanager 标准协议.
 
-\u8fd9\u662f AIOps Agent \u4ece "\u6f14\u793a\u6a21\u5f0f" \u5347\u7ea7\u4e3a "\u751f\u4ea7\u6a21\u5f0f" \u7684\u5173\u952e\u63a5\u53e3:
-  - \u624b\u52a8\u6a21\u5f0f: \u4eba\u5728\u524d\u7aef\u8f93\u5165\u544a\u8b66\u6587\u672c \u2192 SSE \u6d41\u51fa\u8bca\u65ad\u62a5\u544a
-  - \u81ea\u52a8\u6a21\u5f0f (\u672c\u6587\u4ef6): Alertmanager POST \u6807\u51c6 JSON \u2192 \u540e\u53f0\u5f02\u6b65\u8df3\u8bca\u65ad \u2192 \u5199\u5165 history
+这是 AIOps Agent 从 "演示模式" 升级为 "生产模式" 的关键接口:
+  - 手动模式: 人在前端输入告警文本 → SSE 流出诊断报告
+  - 自动模式 (本文档): Alertmanager POST 标准 JSON → Celery 入队 → Worker 异步诊断 → 写入 history
 
-\u4e3a\u4ec0\u4e48\u4e0d\u8d70 SSE?
-  Alertmanager webhook \u8981\u6c42 5s \u5185\u8fd4\u56de 200, \u7136\u540e\u8c03\u7528\u65b9\u4e0d\u518d\u5173\u5fc3\u3002
-  AIOps \u8bca\u65ad\u4e00\u8dd1 30-90s, \u5fc5\u987b\u540e\u53f0\u5f02\u6b65\u8dd1, \u7ed3\u679c\u843d\u76d8\u4f9b\u540e\u7eed\u67e5\u8be2.
+为什么不走 SSE?
+  Alertmanager webhook 要求 5s 内返回 200, 然后调用方不再关心。
+  AIOps 诊断一跑 30-90s, 必须后台异步跑, 结果落盘供后续查询。
 
-\u4e3a\u4ec0\u4e48\u8981\u843d\u76d8 alert_history.jsonl?
-  \u8ba9\u4f60\u80fd\u4e8b\u540e\u770b\u5230 "AIOps \u81ea\u52a8\u8dd1\u4e86\u4ec0\u4e48", \u8bc1\u660e\u5168\u81ea\u52a8\u4e0d\u662f\u5077\u61d2.
+Celery vs BackgroundTasks:
+  当前使用 Celery (Redis broker), 支持:
+  - 任务排队 (不丢告警)
+  - Worker 独立进程 (重启不丢任务)
+  - 失败自动重试 (3 次, 指数退避)
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel, Field
 
-import app.services.aiops_service as aiops_service
+from app.celery_tasks.diagnosis import run_webhook_diagnosis
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 
 # ============================================================
 # Alertmanager v4 webhook payload
-#   \u89c4\u8303: https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
+#   规范: https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
 # ============================================================
 class AlertmanagerAlert(BaseModel):
-    """\u5355\u6761 firing/resolved \u544a\u8b66."""
+    """单条 firing/resolved 告警."""
 
     status: str = Field(default="firing", description="firing | resolved")
     labels: Dict[str, Any] = Field(
         default_factory=dict,
-        description="\u544a\u8b66\u6807\u7b7e (alertname / severity / instance \u7b49)",
+        description="告警标签 (alertname / severity / instance 等)",
     )
     annotations: Dict[str, Any] = Field(
         default_factory=dict,
-        description="\u63cf\u8ff0\u4fe1\u606f (summary / description / runbook_url)",
+        description="描述信息 (summary / description / runbook_url)",
     )
-    startsAt: str = Field(default="", description="\u544a\u8b66\u5f00\u59cb\u65f6\u95f4 ISO8601")
-    endsAt: str = Field(default="", description="\u544a\u8b66\u7ed3\u675f\u65f6\u95f4 (resolved \u624d\u6709)")
-    generatorURL: str = Field(default="", description="\u539f\u59cb\u544a\u8b66\u89c4\u5219 URL")
-    fingerprint: str = Field(default="", description="\u544a\u8b66\u6307\u7eb9 (\u7528\u4e8e\u53bb\u91cd)")
+    startsAt: str = Field(default="", description="告警开始时间 ISO8601")
+    endsAt: str = Field(default="", description="告警结束时间 (resolved 才有)")
+    generatorURL: str = Field(default="", description="原始告警规则 URL")
+    fingerprint: str = Field(default="", description="告警指纹 (用于去重)")
 
 
 class AlertmanagerPayload(BaseModel):
-    """Alertmanager v4 webhook \u5b8c\u6574 payload."""
+    """Alertmanager v4 webhook 完整 payload."""
 
     version: str = Field(default="4")
     groupKey: str = Field(default="")
@@ -67,28 +68,17 @@ class AlertmanagerPayload(BaseModel):
 
 
 # ============================================================
-# History \u843d\u76d8
+# History 落盘 (GET/DELETE 端点只读，写入由 Celery task 负责)
 # ============================================================
 HISTORY_DIR = Path(__file__).resolve().parents[3] / "data"
 HISTORY_FILE = HISTORY_DIR / "alert_history.jsonl"
 
 
-def _ensure_history_dir():
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _append_history(record: Dict[str, Any]) -> None:
-    """\u8ffd\u5199\u4e00\u6761 history \u8bb0\u5f55 (JSONL \u683c\u5f0f, \u7b80\u5355\u53ef\u9760)."""
-    _ensure_history_dir()
-    with HISTORY_FILE.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 # ============================================================
-# \u544a\u8b66 \u2192 \u81ea\u7136\u8bed\u8a00 query (\u4f9b LangGraph \u7406\u89e3)
+# 告警 → 自然语言 query (供 LangGraph 理解)
 # ============================================================
 def _format_alert_as_query(alert: AlertmanagerAlert) -> str:
-    """\u628a\u7ed3\u6784\u5316\u544a\u8b66\u6e32\u67d3\u6210\u4e00\u6bb5\u4eba\u53ef\u8bfb\u3001LLM \u53ef\u7406\u89e3\u7684\u63cf\u8ff0."""
+    """把结构化告警渲染成一段人可读、LLM 可理解的描述."""
     name = alert.labels.get("alertname", "UnknownAlert")
     severity = alert.labels.get("severity", "warning")
     instance = alert.labels.get("instance", "")
@@ -97,105 +87,41 @@ def _format_alert_as_query(alert: AlertmanagerAlert) -> str:
     description = alert.annotations.get("description", "")
     runbook = alert.annotations.get("runbook_url", "")
 
-    instance_text = instance or "(\u672a\u6307\u5b9a)"
+    instance_text = instance or "(未指定)"
     parts = [
-        f"[{severity.upper()}] {name} \u544a\u8b66\u89e6\u53d1",
-        f"\u5b9e\u4f8b: {instance_text}",
+        f"[{severity.upper()}] {name} 告警触发",
+        f"实例: {instance_text}",
     ]
     if service:
-        parts.append(f"\u670d\u52a1: {service}")
+        parts.append(f"服务: {service}")
     if summary:
-        parts.append(f"\u6458\u8981: {summary}")
+        parts.append(f"摘要: {summary}")
     if description:
-        parts.append(f"\u63cf\u8ff0: {description}")
+        parts.append(f"描述: {description}")
     if alert.startsAt:
-        parts.append(f"\u5f00\u59cb\u65f6\u95f4: {alert.startsAt}")
+        parts.append(f"开始时间: {alert.startsAt}")
     if runbook:
-        parts.append(f"\u5e94\u6025\u624b\u518c: {runbook}")
-    parts.append("\u8bf7\u4f60\u4f5c\u4e3a OnCall \u5de5\u7a0b\u5e08, \u8bca\u65ad\u4e0a\u8ff0\u544a\u8b66\u6839\u56e0\u5e76\u7ed9\u51fa\u5904\u7f6e\u5efa\u8bae.")
+        parts.append(f"应急手册: {runbook}")
+    parts.append("请你作为 OnCall 工程师, 诊断上述告警根因并给出处置建议.")
     return "\n".join(parts)
 
 
 # ============================================================
-# \u540e\u53f0\u8dd1\u8bca\u65ad
-# ============================================================
-async def _run_diagnosis_background(
-    query: str,
-    session_id: str,
-    alert_meta: Dict[str, Any],
-) -> None:
-    """\u540e\u53f0\u8dd1 aiops_service.stream_diagnose, \u6536\u96c6\u5b8c\u6574\u4e8b\u4ef6\u6d41 \u2192 \u843d\u76d8.
-
-    \u6ce8\u610f: \u8fd9\u4e0d\u662f SSE, \u4e5f\u4e0d\u62a5\u9519\u7ed9\u8c03\u7528\u65b9.
-    \u7ed3\u679c\u5168\u90e8\u5199\u8fdb HISTORY_FILE, \u5931\u8d25\u4e5f\u8981\u5199 (\u4f9b\u4e8b\u540e\u8c03\u67e5).
-    """
-    started_at = datetime.now(timezone.utc).isoformat()
-    events: List[Dict[str, Any]] = []
-    final_report = ""
-    selected_skill = ""
-    error_msg = ""
-
-    logger.info(
-        f"[webhook] \u540e\u53f0\u542f\u52a8\u8bca\u65ad session={session_id} "
-        f"alert={alert_meta.get('alertname')}"
-    )
-
-    try:
-        async for ev in aiops_service.stream_diagnose(query, session_id=session_id):
-            events.append(ev)
-            ev_type = ev.get("type", "")
-            if ev_type == "skill_selected":
-                selected_skill = ev.get("data", {}).get("skill", "")
-            elif ev_type == "report":
-                final_report = ev.get("data", {}).get("report", "")
-    except asyncio.CancelledError:
-        error_msg = "cancelled"
-        raise
-    except Exception as e:
-        error_msg = f"{type(e).__name__}: {e}"
-        logger.exception(f"[webhook] \u8bca\u65ad\u5f02\u5e38: {e}")
-
-    finished_at = datetime.now(timezone.utc).isoformat()
-
-    record = {
-        "session_id": session_id,
-        "alert": alert_meta,
-        "query": query,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "selected_skill": selected_skill,
-        "report": final_report,
-        "event_count": len(events),
-        "error": error_msg,
-    }
-    _append_history(record)
-    skill_text = selected_skill or "(\u672a\u9009\u4e2d)"
-    logger.info(
-        f"[webhook] \u8bca\u65ad\u5b8c\u6210 session={session_id} "
-        f"skill={skill_text} "
-        f"events={len(events)} report_len={len(final_report)}"
-    )
-
-
-# ============================================================
-# \u8def\u7531
+# 路由
 # ============================================================
 @router.post(
     "/alertmanager",
-    summary="Alertmanager \u544a\u8b66\u63a5\u6536 (\u5168\u81ea\u52a8\u6a21\u5f0f)",
+    summary="Alertmanager 告警接收 (Celery 全自动模式)",
     description=(
-        "\u63a5\u6536 Prometheus Alertmanager \u6807\u51c6 webhook payload, "
-        "\u540e\u53f0\u5f02\u6b65\u542f\u52a8 AIOps \u8bca\u65ad\u3002"
-        "\u7acb\u5373\u8fd4\u56de 200 (Alertmanager \u8981\u6c42 5s \u5185\u54cd\u5e94), "
-        "\u8bca\u65ad\u8fc7\u7a0b\u5728\u540e\u53f0\u8dd1, \u7ed3\u679c\u5199\u5165 data/alert_history.jsonl. "
-        "\u53ef\u901a\u8fc7 GET /webhook/history \u67e5\u770b\u540e\u53f0\u8dd1\u8fc7\u7684\u8bca\u65ad."
+        "接收 Prometheus Alertmanager 标准 webhook payload, "
+        "通过 Celery 任务队列异步启动 AIOps 诊断。"
+        "立即返回 200 (Alertmanager 要求 5s 内响应), "
+        "Celery worker 独立进程跑诊断, 结果写入 data/alert_history.jsonl. "
+        "可通过 GET /webhook/history 查看后台跑过的诊断."
     ),
 )
-async def alertmanager_webhook(
-    payload: AlertmanagerPayload,
-    background: BackgroundTasks,
-):
-    triggered: List[str] = []
+async def alertmanager_webhook(payload: AlertmanagerPayload):
+    triggered: List[Dict[str, str]] = []
     skipped: List[str] = []
     for idx, alert in enumerate(payload.alerts):
         if alert.status != "firing":
@@ -204,7 +130,6 @@ async def alertmanager_webhook(
 
         alertname = alert.labels.get("alertname", f"alert_{idx}")
         instance = alert.labels.get("instance", "unknown")
-        # session_id \u5e26\u4e0a fingerprint \u4fbf\u4e8e\u53bb\u91cd
         fingerprint = alert.fingerprint or f"{alertname}-{instance}-{alert.startsAt}"
         session_id = f"alertmanager-{alertname}-{fingerprint[:12]}"
 
@@ -217,14 +142,12 @@ async def alertmanager_webhook(
             "fingerprint": fingerprint,
             "startsAt": alert.startsAt,
         }
-        background.add_task(
-            _run_diagnosis_background, query, session_id, alert_meta
-        )
-        triggered.append(session_id)
+        task = run_webhook_diagnosis.delay(query, session_id, alert_meta)
+        triggered.append({"session_id": session_id, "task_id": task.id})
 
     logger.info(
-        f"[webhook] \u6536\u5230 {len(payload.alerts)} \u6761 alert, "
-        f"\u89e6\u53d1 {len(triggered)} \u6761\u8bca\u65ad, \u8df3\u8fc7 {len(skipped)} \u6761(non-firing)"
+        f"[webhook] 收到 {len(payload.alerts)} 条 alert, "
+        f"入队 {len(triggered)} 条 Celery 任务, 跳过 {len(skipped)} 条(non-firing)"
     )
     return {
         "status": "accepted",
@@ -236,8 +159,8 @@ async def alertmanager_webhook(
 
 @router.get(
     "/history",
-    summary="\u67e5\u770b webhook \u540e\u53f0\u8dd1\u8fc7\u7684\u8bca\u65ad",
-    description="\u8fd4\u56de\u6700\u8fd1 N \u6761\u540e\u53f0\u8bca\u65ad\u8bb0\u5f55, \u6309\u65f6\u95f4\u500d\u5e8f.",
+    summary="查看 webhook 后台跑过的诊断",
+    description="返回最近 N 条后台诊断记录, 按时间倒序.",
 )
 async def get_history(limit: int = 20):
     if not HISTORY_FILE.exists():
@@ -260,7 +183,7 @@ async def get_history(limit: int = 20):
 
 @router.delete(
     "/history",
-    summary="\u6e05\u7a7a webhook \u8bca\u65ad\u5386\u53f2 (\u6f14\u793a\u7528)",
+    summary="清空 webhook 诊断历史 (演示用)",
 )
 async def clear_history():
     if HISTORY_FILE.exists():

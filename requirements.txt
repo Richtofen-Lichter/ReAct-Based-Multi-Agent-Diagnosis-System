@@ -60,4 +60,5 @@ markdown-it-py>=3.0.0
 tiktoken>=0.7.0
 PyYAML>=6.0  # SKILL.md frontmatter 解析
 redis>=5.0.0
+celery[redis]>=5.4,<6.0
 rank-bm25

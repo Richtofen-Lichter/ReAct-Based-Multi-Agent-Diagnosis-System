@@ -3,16 +3,18 @@
 # ============================================================
 # Startup order:
 #   1. Start / check Milvus container
-#   2. Start / check Redis container (RAG Chat session memory)
-#   3. Start MCP servers in background
-#   4. Wait for MCP ports
-#   5. Start FastAPI by uvicorn in foreground
+#   2. Start / check Redis container (Celery broker + RAG Chat session memory)
+#   3. Start Celery worker (background)
+#   4. Start MCP servers in background
+#   5. Wait for MCP ports
+#   6. Start FastAPI by uvicorn in foreground
 #
 # Usage:
 #   .\run.ps1
 #   .\run.ps1 -NoMcp
 #   .\run.ps1 -NoMilvus
 #   .\run.ps1 -NoRedis
+#   .\run.ps1 -NoCelery
 #   .\run.ps1 -Stop
 # ============================================================
 
@@ -20,6 +22,7 @@ param(
     [switch]$NoMcp,
     [switch]$NoMilvus,
     [switch]$NoRedis,
+    [switch]$NoCelery,
     [switch]$Stop
 )
 
@@ -154,6 +157,17 @@ function Test-HttpReady {
 
 if ($Stop) {
     Write-Host "[stop] stopping multi_agent services..." -ForegroundColor Yellow
+
+    # 先杀所有 celery worker (避免旧版本残留)
+    Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and $_.CommandLine -like "*celery*worker*"
+    } | ForEach-Object {
+        try {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Host "[stop] celery pid=$($_.ProcessId)" -ForegroundColor DarkYellow
+        } catch {}
+    }
+
     Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and (
             $_.CommandLine -like "*$ProjectRoot*" -or
@@ -174,13 +188,59 @@ if ($Stop) {
     exit 0
 }
 
-$Python = if ($env:CONDA_PREFIX -and (Test-Path "$env:CONDA_PREFIX\python.exe")) {
-    "$env:CONDA_PREFIX\python.exe"
-} elseif (Test-Path "$ProjectRoot\.venv\Scripts\python.exe") {
-    "$ProjectRoot\.venv\Scripts\python.exe"
-} else {
-    "python"
+# 按优先级查找 Python:
+#   1. CONDA_PREFIX (conda 已激活的非 base 环境, 最可靠)
+#   2. 常见 conda env 路径扫描 (兜底, CONDA_PREFIX 可能指向 base 或未设置)
+#   3. 项目 .venv
+#   4. 系统 PATH 里的 python (最后兜底, 需自行确保依赖齐全)
+
+function Find-CondaEnvPython {
+    param([string]$EnvName)
+    $searchDirs = @(
+        "$env:USERPROFILE\.conda\envs\$EnvName\python.exe"
+        "D:\Anaconda\envs\$EnvName\python.exe"
+        "C:\Anaconda\envs\$EnvName\python.exe"
+        "$env:USERPROFILE\Anaconda\envs\$EnvName\python.exe"
+        "$env:ProgramData\Anaconda\envs\$EnvName\python.exe"
+    )
+    foreach ($dir in $searchDirs) {
+        if (Test-Path $dir) { return $dir }
+    }
+    return $null
 }
+
+$Python = $null
+
+# 1. CONDA_PREFIX 指向的非 base 环境 (路径中含 envs\ 才算命名环境)
+if ($env:CONDA_PREFIX -and $env:CONDA_PREFIX -match "\\envs\\" -and (Test-Path "$env:CONDA_PREFIX\python.exe")) {
+    $Python = "$env:CONDA_PREFIX\python.exe"
+    Write-Host "[hint] using activated conda env: $env:CONDA_PREFIX" -ForegroundColor Green
+}
+
+# 2. 扫描常见 conda env 位置 (适配 README 推荐的 multi_rag / multi-rag)
+if (-not $Python) {
+    foreach ($name in @("multi-rag", "multi_rag")) {
+        $found = Find-CondaEnvPython -EnvName $name
+        if ($found) {
+            $Python = $found
+            Write-Host "[hint] conda env '$name' detected at $Python" -ForegroundColor Green
+            break
+        }
+    }
+}
+
+# 3. 项目 .venv
+if (-not $Python -and (Test-Path "$ProjectRoot\.venv\Scripts\python.exe")) {
+    $Python = "$ProjectRoot\.venv\Scripts\python.exe"
+    Write-Host "[hint] using project .venv" -ForegroundColor Green
+}
+
+# 4. 系统 PATH 兜底
+if (-not $Python) {
+    $Python = "python"
+    Write-Host "[warn] no conda env or venv found, using system python. Ensure dependencies are installed." -ForegroundColor Yellow
+}
+
 Write-Host "[start] Python: $Python" -ForegroundColor Cyan
 
 if (-not (Test-Path "$ProjectRoot\.env")) {
@@ -224,6 +284,23 @@ if (-not $NoRedis) {
     }
 } else {
     Write-Host "[skip] Redis auto-start disabled by -NoRedis" -ForegroundColor DarkYellow
+}
+
+# --- Celery Worker ---
+if (-not $NoCelery) {
+    $CeleryLogOut = Join-Path $LogDir "celery_worker.out.log"
+    $CeleryLogErr = Join-Path $LogDir "celery_worker.err.log"
+    Write-Host "[start] Celery worker (background)..." -ForegroundColor Cyan
+    Start-Process -FilePath $Python `
+        -ArgumentList "-m celery -A celery_worker:celery_app worker --concurrency=1 --loglevel=warning --pool=threads" `
+        -WindowStyle Hidden `
+        -WorkingDirectory $ProjectRoot `
+        -RedirectStandardOutput $CeleryLogOut `
+        -RedirectStandardError $CeleryLogErr
+    Write-Host "[start] Celery worker started (logs: $CeleryLogOut)" -ForegroundColor Green
+    Start-Sleep -Seconds 2
+} else {
+    Write-Host "[skip] Celery worker auto-start disabled by -NoCelery" -ForegroundColor DarkYellow
 }
 
 if (-not $NoMcp) {

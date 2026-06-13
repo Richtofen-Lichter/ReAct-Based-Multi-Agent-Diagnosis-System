@@ -88,6 +88,20 @@ class Settings(BaseSettings):
 
     # ==================== RAG Chat 会话记忆 ====================
     redis_url: str = Field(default="redis://localhost:6379/0", description="Redis 连接地址")
+
+    # ==================== Celery 任务队列 ====================
+    celery_broker_url: str = Field(
+        default="redis://localhost:6379/1",
+        description="Celery broker URL (Redis DB 1, 独立于 RAG Chat DB 0)",
+    )
+    celery_result_backend: str = Field(
+        default="redis://localhost:6379/2",
+        description="Celery result backend URL (Redis DB 2, TTL 7 天)",
+    )
+    celery_worker_concurrency: int = Field(
+        default=1,
+        description="Celery worker 并发数 (solo pool, 配合 Semaphore 做串行排队)",
+    )
     rag_chat_memory_enabled: bool = Field(default=False, description="是否启用 RAG Chat Redis 会话记忆")
     rag_chat_history_turns: int = Field(default=3, description="回答时注入最近 N 轮对话")
     rag_chat_memory_ttl_sec: int = Field(default=604800, description="RAG Chat 会话记忆 TTL 秒数")
