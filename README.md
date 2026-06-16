@@ -2,6 +2,17 @@
 
 一个由LangGraph驱动的用户级异常诊断平台。用户输入告警后，系统自动选 Skill、定计划、调工具、复盘、出报告——五步走完一个完整的诊断闭环。受渐进式披露（Progressive Disclosure）思想的启发，根据用户输入动态选择诊断用的 Skill，避免一上来就把全部工具和 SOP 塞进上下文。
 
+<div align="center">
+
+[![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
+[![LangGraph](https://img.shields.io/badge/LangGraph-1.0+-FF6F00?logo=langchain)](https://langchain-ai.github.io/langgraph/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Milvus](https://img.shields.io/badge/Milvus-2.4+-00B4C5?logo=milvus)](https://milvus.io/)
+[![Redis](https://img.shields.io/badge/Redis-7.0+-DC382D?logo=redis)](https://redis.io/)
+[![Celery](https://img.shields.io/badge/Celery-5.4+-37814A?logo=celery)](https://docs.celeryq.dev/)
+
+</div>
+
 ---
 
 ## 为什么还需要一个 AIOps 平台？
@@ -65,41 +76,6 @@
 
 - **RAG Chat**（左）：知识库问答 + 多轮记忆 + 可选 MCP 工具，走 SSE 流式。适合知识型提问，比如"Redis 内存高怎么排查"。
 - **AIOps 诊断**（右）：多智能体故障诊断，走 Plan-Execute-Replan 图编排，每步都通过 SSE 实时反馈。适合真实告警。
-
----
-
-## 界面展示
-
-### AIOps 诊断
-
-从左到右：进入诊断，接收告警，Planner 拆步，Executor 执行，Replanner 评估 — 全程流式传输。
-
-<table>
-<tr>
-<td><img src="展示/AIOps.png" alt="AIOps 诊断实时过程" width="100%"></td>
-<td><img src="展示/最终报告.png" alt="最终诊断报告" width="100%"></td>
-</tr>
-<tr>
-<td align="center"><em>诊断实时过程</em></td>
-<td align="center"><em>最终诊断报告</em></td>
-</tr>
-</table>
-
-### 全自动诊断（Alertmanager Webhook）
-
-对接 Prometheus Alertmanager，告警来了自动走完 Skill 选择 → 计划 → 取证 → 报告全流程，无需人工介入。前端支持一键模拟告警和诊断历史回溯。
-
-<p align="center">
-  <img src="展示/Webhook.png" alt="Webhook 全自动诊断" width="90%">
-</p>
-
-### 知识库管理
-
-支持随时上传 `.md` / `.txt` 文档，自动切分、向量化并存入 Milvus。
-
-<p align="center">
-  <img src="展示/知识库.png" alt="知识库文档上传" width="70%">
-</p>
 
 ---
 

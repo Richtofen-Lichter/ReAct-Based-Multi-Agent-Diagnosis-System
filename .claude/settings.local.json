@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "mcp__github__get_me",
-      "Read(//d/d/Agent八股_项目_学习/OnCall/**)"
+      "Read(//d/d/Agent八股_项目_学习/OnCall/**)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git *)",
+      "Bash(npm run *)",
+      "Bash(conda run *)",
+      "Bash(\"C:\\\\Users\\\\LLFDSB\\\\.conda\\\\envs\\\\multi-rag\\\\python.exe\" -c \"import app.tasks.diagnosis; print\\('import OK'\\)\")",
+      "Bash('C:\\\\Users\\\\LLFDSB\\\\.conda\\\\envs\\\\multi-rag\\\\python.exe' -c ' *)",
+      "Bash(C:\\\\Users\\\\LLFDSB\\\\.conda\\\\envs\\\\multi-rag\\\\python.exe *)"
     ]
   }
 }
