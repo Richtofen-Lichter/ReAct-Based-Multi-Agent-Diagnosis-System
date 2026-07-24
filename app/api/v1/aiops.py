@@ -48,7 +48,9 @@ async def aiops_diagnose(req: DiagnosisRequest) -> EventSourceResponse:
     async def event_generator() -> AsyncIterator[dict]:
         try:
             async for sse_event in aiops_service.stream_diagnose(
-                req.query, session_id=req.session_id
+                req.query,
+                session_id=req.session_id,
+                diagnosis_mode=req.diagnosis_mode,
             ):
                 yield {
                     "event": "message",

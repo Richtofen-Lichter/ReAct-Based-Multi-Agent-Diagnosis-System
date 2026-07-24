@@ -66,6 +66,14 @@ class PlanExecuteState(TypedDict, total=False):
     tried_skills: Annotated[List[TriedSkill], operator.add]  # 已试过的 skill + 被拒原因
     pending_reroute: bool                                  # 临时标记: replanner 本轮决定 reroute, 带回 Planner
 
+    # ===== fast/deep 双模式 (与 Mutil-Rag-Agent fork 对齐) =====
+    # 由 services/aiops_service.stream_diagnose 注入初始 state. fast 图本身不读这两个
+    # 字段, 仅用于透传/观测; deep 图 (阶段 1) 会读 diagnosis_mode 做节点分支.
+    #   diagnosis_mode:           effective 模式 (实际将执行的图模式)
+    #   requested_diagnosis_mode: 用户原始请求模式 (deep 被关闭回落 fast 时与 effective 不同)
+    diagnosis_mode: str
+    requested_diagnosis_mode: str
+
 
 # ============================================================
 # Planner 的结构化输出

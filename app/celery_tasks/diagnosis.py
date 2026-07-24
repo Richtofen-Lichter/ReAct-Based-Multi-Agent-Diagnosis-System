@@ -26,11 +26,21 @@ def _append_history(record: Dict[str, Any]) -> None:
     default_retry_delay=30,
     autoretry_for=(Exception,),
 )
-def run_webhook_diagnosis(self, query: str, session_id: str, alert_meta: Dict[str, Any]) -> Dict[str, Any]:
+def run_webhook_diagnosis(
+    self,
+    query: str,
+    session_id: str,
+    alert_meta: Dict[str, Any],
+    diagnosis_mode: str = "fast",
+) -> Dict[str, Any]:
     """后台跑 stream_diagnose, 收集事件 → 写 history.
 
     Celery worker 独立进程执行, 不阻塞 FastAPI.
     失败时自动重试 (3 次, 指数退避 30s/60s/120s).
+
+    Args:
+        diagnosis_mode: fast / deep. 由 webhook 的 _diagnosis_mode_for 按 severity/
+            告警数确定性选定, 真生效仍受 settings.deep_diagnosis_enabled gate.
     """
     started_at = datetime.now(timezone.utc).isoformat()
     events: List[Dict[str, Any]] = []
@@ -40,12 +50,15 @@ def run_webhook_diagnosis(self, query: str, session_id: str, alert_meta: Dict[st
 
     logger.info(
         f"[celery] 后台启动诊断 session={session_id} "
-        f"alert={alert_meta.get('alertname')} retry={self.request.retries}"
+        f"alert={alert_meta.get('alertname')} mode={diagnosis_mode} "
+        f"retry={self.request.retries}"
     )
 
     async def _run() -> None:
         nonlocal selected_skill, final_report, events
-        async for ev in aiops_service.stream_diagnose(query, session_id=session_id):
+        async for ev in aiops_service.stream_diagnose(
+            query, session_id=session_id, diagnosis_mode=diagnosis_mode
+        ):
             events.append(ev)
             ev_type = ev.get("type", "")
             if ev_type == "skill_selected":
@@ -74,6 +87,7 @@ def run_webhook_diagnosis(self, query: str, session_id: str, alert_meta: Dict[st
         "session_id": session_id,
         "alert": alert_meta,
         "query": query,
+        "diagnosis_mode": diagnosis_mode,
         "started_at": started_at,
         "finished_at": finished_at,
         "selected_skill": selected_skill,

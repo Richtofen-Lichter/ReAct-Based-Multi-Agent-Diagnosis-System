@@ -2,20 +2,21 @@
 
 把 LangGraph 图的 astream 输出包装成统一格式的 SSE 事件流, 供前端消费.
 
-事件类型 (见 schemas/aiops.py EventType):
-  - start           流程启动
-  - skill_selected  SkillRouter 选定 Skill (新增)
-  - plan            Planner 输出初始计划
-  - step_complete   Executor 完成单步
-  - replan          Replanner 给出新计划
-  - report          最终诊断报告
-  - complete        流程结束
-  - error           异常
+按 diagnosis_mode 派发到两张图之一 (effective_mode 由 resolve_effective_mode +
+settings.deep_diagnosis_enabled 决定):
+  - fast (默认): build_aiops_graph() —— SkillRouter→Planner→Executor⇄Replanner→Report
+  - deep:        build_deep_graph()   —— IncidentManager→CorrelationContext→EvidencePlan
+                →[4 专家并行]→EvidenceReducer→RCAJudge→RemediationPlanner→Report
+                (deep 图懒构建, 仅 deep 模式真跑时才 import + 编译, 不影响 fast / 启动)
+
+事件类型 (fast 与 deep 共用同一词表, 见 schemas/aiops.py EventType):
+  fast:  start / mode_selected / skill_selected / plan / step_*/replan / report / complete / error
+  deep:  额外 evidence_plan / evidence / candidates / rca / remediation (按 node_name 分发)
 
 设计要点:
   - 全程结构化事件 (字典), 由 API 层统一 JSON 编码
   - 异常被 try/except 捕获后转为 error 事件, 不让流中断
-  - 单实例 graph: 在模块加载时构建一次, 避免每次请求重新编译
+  - 单实例 graph: 模块级缓存, 避免每次请求重新编译 (fast/deep 各一份)
 """
 
 import asyncio
@@ -26,10 +27,13 @@ from loguru import logger
 from app.agents import build_aiops_graph
 from app.agents.stream_sink import set_sink
 from app.config import settings
+from app.incidents.models import DiagnosisMode
+from app.orchestration.diagnosis_mode import resolve_effective_mode
 import app.services.chat_memory as chat_memory
 
 # 模块级单例 (图编译有开销, 不要每次请求都建)
 _graph = None
+_deep_graph = None
 _agent_semaphore = asyncio.Semaphore(settings.agent_max_concurrency)
 
 
@@ -40,6 +44,17 @@ def _get_graph():
     return _graph
 
 
+def _get_deep_graph():
+    """懒构建 deep 诊断图 (独立于 fast)。仅在 deep 模式真要跑时才 import + 编译,
+    故 deep 图的任何依赖/错误都不会拖垮 fast 路径或应用启动。"""
+    global _deep_graph
+    if _deep_graph is None:
+        from app.diagnosis_graphs import build_deep_graph
+
+        _deep_graph = build_deep_graph()
+    return _deep_graph
+
+
 def _make_event(
     event_type: str, stage: str, message: str = "", **data: Any
 ) -> Dict[str, Any]:
@@ -48,19 +63,32 @@ def _make_event(
 
 
 async def stream_diagnose(
-    query: str, *, session_id: str = "default"
+    query: str,
+    *,
+    session_id: str = "default",
+    diagnosis_mode: str | DiagnosisMode = DiagnosisMode.FAST,
 ) -> AsyncIterator[Dict[str, Any]]:
     """流式诊断, yield 一系列结构化事件.
 
     Args:
-        query:      用户输入 (告警描述 / 故障现象)
-        session_id: 会话 ID, 用于日志关联
+        query:          用户输入 (告警描述 / 故障现象)
+        session_id:     会话 ID, 用于日志关联
+        diagnosis_mode:  诊断模式 (fast / deep). deep 在 settings.deep_diagnosis_enabled
+                        开启时走独立 Deep Diagnosis 图 (阶段 1 接入), 否则回落 fast.
 
     Yields:
         Dict[str, Any]: SSE 事件字典
     """
+    requested_mode, effective_mode, group_agent_reserved = resolve_effective_mode(
+        diagnosis_mode
+    )
+    # deep 图已接入 (build_deep_graph). 不再做 phase 0 的强制降级 ——
+    # effective_mode 由 settings.deep_diagnosis_enabled 决定, 关闭时 resolve 已回落 fast.
     async with _agent_semaphore:
-        logger.info(f"[aiops] session={session_id} | query={query[:100]}...")
+        logger.info(
+            f"[aiops] session={session_id} | requested={requested_mode.value} | "
+            f"effective={effective_mode.value} | query={query[:100]}..."
+        )
 
         yield _make_event(
             "start",
@@ -68,9 +96,29 @@ async def stream_diagnose(
             message="开始故障诊断",
             query=query,
             session_id=session_id,
+            requested_mode=requested_mode.value,
+            effective_mode=effective_mode.value,
         )
 
-        graph = _get_graph()
+        # mode_selected: 告诉前端"最终跑哪个图"以及"deep 是否被降级".
+        if effective_mode == DiagnosisMode.DEEP:
+            mode_message = "深度诊断图: 多 Agent 取证与 RCA"
+        elif group_agent_reserved:
+            mode_message = "deep 模式未启用, 本次回落到 fast Plan-Execute-Replan"
+        else:
+            mode_message = "fast 模式: Plan-Execute-Replan 诊断"
+        yield _make_event(
+            "mode_selected",
+            "diagnosis_mode",
+            message=mode_message,
+            requested_mode=requested_mode.value,
+            effective_mode=effective_mode.value,
+            group_agent_reserved=group_agent_reserved,
+        )
+
+        # 按 effective_mode 选图: deep 启用且请求 deep -> 独立深度图; 否则 fast.
+        # 两图 graph_input 共用 input/diagnosis_mode/requested_diagnosis_mode 这几个字段.
+        graph = _get_deep_graph() if effective_mode == DiagnosisMode.DEEP else _get_graph()
 
         # Executor 里 tool_runner 走 astream 的 token 会被 emit_stream 推到这个队列,
         # 主循环和 graph.astream 节点事件合并 yield, 让前端边跑边看.
@@ -81,7 +129,11 @@ async def stream_diagnose(
         async def _graph_runner() -> None:
             try:
                 async for event in graph.astream(
-                    {"input": query},
+                    {
+                        "input": query,
+                        "diagnosis_mode": effective_mode.value,
+                        "requested_diagnosis_mode": requested_mode.value,
+                    },
                     config={"recursion_limit": settings.agent_max_steps * 3 + 5},
                 ):
                     await token_queue.put({"__node__": event})
@@ -244,6 +296,77 @@ async def _convert_node_event(
                 message="Fork Skill 子图已产出最终报告",
                 report=response,
                 fork=True,
+            )
+
+    # ===== Deep Diagnosis 节点 =====
+    # 节点名与 fast 互不重叠, 同一函数分发不影响 fast 行为.
+    # 大量事件已由 transition_history -> "transition" SSE 自动产生; 这里只补
+    # "前端要拿到结构化 payload" 的关键事件.
+    elif node_name == "evidence_plan":
+        plan = node_output.get("evidence_plan", {}) or {}
+        agents = plan.get("agents", []) or []
+        yield _make_event(
+            "evidence_plan",
+            "evidence_planned",
+            message=f"取证计划: 派出 {len(agents)} 个专业 Agent",
+            agents=agents,
+            strategy=plan.get("strategy", ""),
+        )
+
+    elif node_name in {"log_agent", "metric_agent", "infra_agent", "runbook_agent"}:
+        # 各专业 subagent 只回 Evidence; evidences 是 add 累加,
+        # node_output 里只含本节点新增的那 (一或多) 条.
+        new_evs = node_output.get("evidences", []) or []
+        for ev in new_evs:
+            yield _make_event(
+                "evidence",
+                f"{node_name}_evidence",
+                message=str(ev.get("summary") or "")[:200],
+                agent=node_name,
+                source=str(ev.get("source", "")),
+                evidence_type=str(ev.get("type", "")),
+            )
+
+    elif node_name == "evidence_reducer":
+        cands = node_output.get("candidates", []) or []
+        yield _make_event(
+            "candidates",
+            "candidates_reduced",
+            message=f"归并得到 {len(cands)} 个候选根因",
+            candidates=cands,
+        )
+
+    elif node_name == "rca_judge":
+        rca = node_output.get("rca", {}) or {}
+        if rca:
+            yield _make_event(
+                "rca",
+                "rca_judged",
+                message=str(rca.get("root_cause") or "")[:200],
+                rca=rca,
+            )
+
+    elif node_name == "remediation_planner":
+        rem = node_output.get("remediation", {}) or {}
+        if rem:
+            yield _make_event(
+                "remediation",
+                "remediation_planned",
+                message=("处置建议待人工确认" if rem.get("requires_human_confirm") else "处置建议已生成"),
+                remediation=rem,
+            )
+
+    elif node_name == "report":
+        # deep graph 的最终 Report 节点; 复用 fast 的 type="report"
+        # 让前端 SSE 同一套渲染逻辑能直接对接, 不必区分模式.
+        response = node_output.get("response", "")
+        if response:
+            yield _make_event(
+                "report",
+                "report_generated",
+                message="深度诊断报告已生成",
+                report=response,
+                deep=True,
             )
 
     # 其他未识别节点忽略 (例如内部节点)

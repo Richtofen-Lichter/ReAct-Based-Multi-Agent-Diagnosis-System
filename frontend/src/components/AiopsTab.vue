@@ -22,6 +22,10 @@ const {
 const query = ref('我的电脑内存占用居高不下, 系统明显卡顿, 浏览器和开发工具响应变慢, 已持续 12 分钟')
 const running = ref(false)
 
+// fast/deep 诊断模式 (与后端 DiagnosisMode 对齐)
+const diagnosisMode = ref('fast')  // 'fast' | 'deep'
+const modeBadge = ref('')          // mode_selected 事件回填: deep 回落 fast 时显示降级提示
+
 // Plan
 const plan = ref([])
 
@@ -43,6 +47,9 @@ const monitor = reactive({
   streamContent: '',
   toolFeed: [],
 })
+
+// Deep 取证时间线 (evidence / candidates / rca / remediation / evidence_plan)
+const deepFeed = ref([])
 
 // Report
 const reportHtml = ref('')
@@ -119,6 +126,26 @@ function handleAIOpsEvent(ev) {
   switch (t) {
     case 'start':
       status.value = 'Skill Router 工作中...'
+      break
+
+    case 'transition': {
+      // 节点出口 transition (含 deep 图 DEEP_* 各节点进度). deep 模式下推到时间线.
+      const reason = d.reason || ''
+      if (reason.startsWith('deep_')) {
+        deepFeed.value.push({
+          kind: 'transition', label: d.node || '',
+          detail: reason + (d.message ? ` · ${d.message}` : ''),
+        })
+      }
+      break
+    }
+
+    case 'mode_selected':
+      // 后端告知最终跑哪个图 + deep 是否被降级 (group_agent_reserved)
+      modeBadge.value = d.group_agent_reserved
+        ? '⚠️ deep 未启用, 已降级 fast'
+        : (d.effective_mode === 'deep' ? '深度诊断图' : 'fast 模式')
+      status.value = d.message || status.value
       break
 
     case 'skill_selected':
@@ -208,6 +235,38 @@ function handleAIOpsEvent(ev) {
       break
     }
 
+    // ===== Deep 图结构化事件: 累加进 deepFeed 时间线 (fast 模式不发这些) =====
+    case 'evidence_plan':
+      deepFeed.value.push({
+        kind: 'plan', label: '取证计划',
+        detail: `派出 ${(d.agents || []).join(' / ') || '(无)'} · ${d.strategy || ''}`,
+      })
+      break
+    case 'evidence':
+      deepFeed.value.push({
+        kind: 'evidence', label: `证据 · ${d.agent || ''}`,
+        detail: d.message || '',
+      })
+      break
+    case 'candidates':
+      deepFeed.value.push({
+        kind: 'candidates', label: '候选根因',
+        detail: `归并 ${(d.candidates || []).length} 个候选`,
+      })
+      break
+    case 'rca':
+      deepFeed.value.push({
+        kind: 'rca', label: 'RCA 判定',
+        detail: d.message || (d.rca && d.rca.root_cause) || '',
+      })
+      break
+    case 'remediation':
+      deepFeed.value.push({
+        kind: 'remediation', label: '处置建议',
+        detail: d.message || '',
+      })
+      break
+
     case 'step_complete': {
       const iter = d.iteration || 0
       let s = steps.value.find(s => s.iteration === iter)
@@ -256,6 +315,8 @@ async function start() {
   plan.value = []
   steps.value = []
   reportHtml.value = ''
+  modeBadge.value = ''
+  deepFeed.value = []
   showMonitorPanel()
   resetMonitor()
   status.value = 'Skill Router 工作中...'
@@ -268,7 +329,11 @@ async function start() {
     const resp = await fetch(`${API}/aiops/diagnose`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: `web-${Date.now()}`, query: q }),
+      body: JSON.stringify({
+        session_id: `web-${Date.now()}`,
+        query: q,
+        diagnosis_mode: diagnosisMode.value,
+      }),
       signal: abortController.signal,
     })
     await consumeSSE(resp, handleAIOpsEvent)
@@ -317,11 +382,58 @@ onUnmounted(() => {
     <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 aiops-grid">
       <!-- 左侧: 输入 + 计划 + 步骤 -->
       <div class="xl:col-span-1 flex flex-col min-h-0 space-y-3">
+        <!-- fast/deep 诊断模式切换 -->
+        <div class="flex items-center gap-2 text-xs">
+          <span class="font-semibold text-slate-600">诊断模式</span>
+          <div class="inline-flex rounded-lg overflow-hidden border border-slate-300">
+            <button
+              type="button"
+              :disabled="running"
+              @click="diagnosisMode = 'fast'"
+              :class="diagnosisMode === 'fast' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'"
+              class="px-3 py-1 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >日常 (fast)</button>
+            <button
+              type="button"
+              :disabled="running"
+              @click="diagnosisMode = 'deep'"
+              :class="diagnosisMode === 'deep' ? 'bg-indigo-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'"
+              class="px-3 py-1 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >深度 (deep)</button>
+          </div>
+          <span v-if="modeBadge" class="text-slate-400">{{ modeBadge }}</span>
+        </div>
+
         <QueryInput v-model="query" :running="running" @start="start" @stop="stop" />
 
         <PlanPanel :plan="plan" />
 
         <StepList :steps="steps" />
+
+        <!-- Deep 取证时间线 (仅 deep 模式有内容时显示) -->
+        <div
+          v-if="deepFeed.length"
+          class="border rounded-lg bg-white p-3 space-y-1 max-h-64 overflow-y-auto"
+        >
+          <div class="text-xs font-semibold text-slate-600 mb-1">🔍 Deep 取证时间线</div>
+          <div
+            v-for="(item, i) in deepFeed"
+            :key="i"
+            class="text-xs flex items-start gap-2 border-b border-slate-100 last:border-0 py-1"
+          >
+            <span
+              :class="{
+                'text-indigo-600': item.kind === 'plan' || item.kind === 'transition',
+                'text-emerald-600': item.kind === 'evidence',
+                'text-amber-600': item.kind === 'candidates',
+                'text-rose-600': item.kind === 'rca',
+                'text-sky-600': item.kind === 'remediation',
+              }"
+              class="font-semibold shrink-0"
+            >{{ item.label }}</span>
+            <span class="text-slate-500 truncate">{{ item.detail }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- 右侧: 监控 / 报告 -->

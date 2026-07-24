@@ -60,6 +60,18 @@ FORK_FAILED = "fork_failed"
 SUBAGENT_DELEGATED = "subagent_delegated"
 SUBAGENT_FAILED = "subagent_failed"
 
+# === Deep Diagnosis (群聊 / M7 多 Agent 组诊断) ===
+# deep 图与 fast 的 transition reason 互不重叠, 故可在同一 _convert_node_event 分发.
+DEEP_INCIDENT_LOADED = "deep_incident_loaded"          # IncidentManager 载入诊断对象
+DEEP_CONTEXT_BUILT = "deep_context_built"              # CorrelationContext 从 KG 拉到上下文
+DEEP_EVIDENCE_PLANNED = "deep_evidence_planned"        # EvidencePlan 定下派哪几个专业 subagent
+DEEP_AGENT_DONE = "deep_agent_done"                    # 某专业 subagent 产出 Evidence (detail 标明哪个)
+DEEP_EVIDENCE_REDUCED = "deep_evidence_reduced"        # EvidenceReducer 归并出候选根因
+DEEP_RCA_JUDGED = "deep_rca_judged"                    # RCAJudge 定根因
+DEEP_REMEDIATION_PLANNED = "deep_remediation_planned"  # RemediationPlanner 出处置 (待人工确认)
+DEEP_REPORT_DONE = "deep_report_done"                  # ReportAgent 出报告
+DEEP_STUB = "deep_stub"                                # 节点尚为 stub, 真实逻辑未实现
+
 
 # ============================================================
 # 数据结构

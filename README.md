@@ -2,9 +2,11 @@
 
 一个由LangGraph驱动的用户级异常诊断平台。用户输入告警后，系统自动选 Skill、定计划、调工具、复盘、出报告——五步走完一个完整的诊断闭环。受渐进式披露（Progressive Disclosure）思想的启发，根据用户输入动态选择诊断用的 Skill，避免一上来就把全部工具和 SOP 塞进上下文。
 
+**v3 起，诊断支持 fast / deep 双模式**：日常告警走 fast 单图（SkillRouter→Planner→Executor⇄Replanner→Report），延迟低；critical / 影响面大的故障走 deep 多 Agent 取证图（IncidentManager→CorrelationContext→EvidencePlan→4 个隔离专家并行→EvidenceReducer→RCAJudge→RemediationPlanner→Report），证据链更完整。模式可前端切换，也可由 Alertmanager webhook 按严重度自动选定。两图共享同一套 SSE 事件词表，前端无需为模式分叉渲染逻辑。
+
 <div align="center">
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.12+-blue?logo=python)](https://python.org)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.0+-FF6F00?logo=langchain)](https://langchain-ai.github.io/langgraph/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Milvus](https://img.shields.io/badge/Milvus-2.4+-00B4C5?logo=milvus)](https://milvus.io/)
@@ -52,16 +54,25 @@
      └──────────┬──────────┘         └──────────┬──────────┘
                 │                               │
                 │                    ┌──────────▼──────────┐
-                │                    │   LangGraph Graph    │
-                │                    │                      │
-                │                    │  SkillRouter         │
-                │                    │    ↓                 │
-                │                    │  Planner             │
-                │                    │    ↓                 │
-                │                    │  Executor ── RAG     │
-                │                    │    │   └── MCP Tools │
-                │                    │    ↓                 │
-                │                    │  Replanner           │
+                │                    │   aiops_service      │
+                │                    │  resolve mode →      │
+                │                    │  派发 fast/deep 图    │
+                │                    └──────────┬──────────┘
+                │                    ┌──────────┴──────────┐
+                │                    ▼                     ▼
+                │            ┌─────────────┐       ┌─────────────────┐
+                │            │  fast 图     │       │   deep 图        │
+                │            │ SkillRouter │       │ IncidentManager │
+                │            │   ↓         │       │   ↓             │
+                │            │ Planner     │       │ CorrelationCtx  │
+                │            │   ↓         │       │   ↓             │
+                │            │ Executor⇄RAG│       │ EvidencePlan    │
+                │            │   ↓         │       │   ↓ (fan-out)   │
+                │            │ Replanner   │       │ 4 专家→Reducer  │
+                │            │   ↓         │       │   ↓             │
+                │            │ Report      │       │ RCA→Remed→Report│
+                │            └─────────────┘       └─────────────────┘
+                │                    │                     │
                 │                    └──────────┬──────────┘
                 │                               │
      ┌──────────▼───────────────────────────────▼──────────┐
@@ -75,7 +86,7 @@
 两条独立链路：
 
 - **RAG Chat**（左）：知识库问答 + 多轮记忆 + 可选 MCP 工具，走 SSE 流式。适合知识型提问，比如"Redis 内存高怎么排查"。
-- **AIOps 诊断**（右）：多智能体故障诊断，走 Plan-Execute-Replan 图编排，每步都通过 SSE 实时反馈。适合真实告警。
+- **AIOps 诊断**（右）：按 `diagnosis_mode` 派发到 fast 或 deep 图，每步都通过 SSE 实时反馈。fast 适合日常告警，deep 适合 critical / 影响面大的故障。
 
 ---
 
@@ -205,12 +216,12 @@ BM25 这一路不用 jieba 分词。它的任务是抓向量容易漏的东西�
 
 ## 快速开始
 
-**前置**：Python 3.11+、Docker、DeepSeek API Key
+**前置**：Python 3.12+、Docker、DeepSeek API Key
 
 ```bash
 # 1. 依赖
 git clone <repo-url> && cd multi_agent_github
-conda create -n multi_rag python=3.11 -y && conda activate multi_rag
+conda create -n multi_rag python=3.12 -y && conda activate multi_rag
 pip install -r requirements.txt
 
 # 2. 环境变量
@@ -295,12 +306,28 @@ multi_agent_github/
 │   │   └── v1/                   chat / aiops / documents / skills / webhook / health
 │   │
 │   ├── agents/                   智能体
-│   │   ├── graph.py              LangGraph 图，5 节点 + conditional edges
+│   │   ├── graph.py              LangGraph 图 (fast), 5 节点 + conditional edges
 │   │   ├── state.py              PlanExecuteState TypedDict + Plan/Act 模型
+│   │   ├── state_deep.py         DeepDiagnosisState (deep 图状态)
 │   │   ├── prompts.py            三套 Prompt
 │   │   ├── planner.py            拆任务 → Plan
 │   │   ├── executor.py           单步执行 + 工具并行
-│   │   └── replanner.py          评估 + 四向决策 + Reroute + pro 报告
+│   │   ├── replanner.py          评估 + 四向决策 + Reroute + pro 报告
+│   │   ├── fork_runner.py        fork Skill 子图隔离执行
+│   │   ├── metric_agent.py       deep 图: 指标取证专家
+│   │   ├── log_agent.py          deep 图: 日志/知识检索专家
+│   │   ├── infra_agent.py        deep 图: 运行环境/依赖专家
+│   │   ├── runbook_agent.py      deep 图: SOP/Runbook 检索专家
+│   │   └── subagents/            可委派子 agent
+│   │
+│   ├── diagnosis_graphs/          Deep Diagnosis 图
+│   │   └── deep_diagnosis_graph.py  8 节点编排: 证据计划→专家并行→归并→RCA→处置→报告
+│   │
+│   ├── incidents/                诊断模式契约
+│   │   └── models.py             DiagnosisMode (fast/deep) + EvidenceSource
+│   │
+│   ├── orchestration/            诊断编排
+│   │   └── diagnosis_mode.py     resolve_effective_mode (deep 开关 gate)
 │   │
 │   ├── skills/                   Skill 系统
 │   │   ├── registry.py           启动扫描，进程级单例
@@ -309,7 +336,7 @@ multi_agent_github/
 │   │   └── definitions/          4 个 SKILL.md
 │   │
 │   ├── services/                 业务服务
-│   │   ├── aiops_service.py      AIOps 流式诊断 SSE 包装
+│   │   ├── aiops_service.py      AIOps 流式诊断 (fast/deep 派发 + SSE 包装)
 │   │   ├── rag_service.py        RAG Chat 流式编排
 │   │   ├── chat_memory.py        Redis 会话记忆
 │   │   ├── document_service.py   知识库管理
@@ -326,12 +353,15 @@ multi_agent_github/
 │   ├── tools/                    工具系统
 │   │   ├── meta.py               ToolMeta 注册表
 │   │   ├── mcp_loader.py         聚合加载
-│   │   └── lazy_mcp_tools.py     两阶段按需发现 (可选)
+│   │   ├── lazy_mcp_tools.py     两阶段按需发现 (可选)
+│   │   └── prom_tool.py          Prometheus 指标工具 (未接入时降级为空)
 │   │
 │   ├── runtime/                  运行时
 │   │   ├── permissions.py        四模式 + 三层决策
 │   │   ├── tool_filter.py        白名单 + 黑名单
-│   │   └── tool_runner.py        只读工具并行
+│   │   ├── tool_runner.py        只读工具并行
+│   │   ├── agent_harness.py      模型-角色注册表 (deep 图复用 flash/pro 档位)
+│   │   └── transitions.py        转换原因枚举 (含 DEEP_* 深度图节点)
 │   │
 │   └── schemas/                  数据模型
 │       ├── common.py             ApiResponse[T]
@@ -353,6 +383,77 @@ multi_agent_github/
 ---
 ## 完整的AI开发文档
   本项目90%的代码层面工作由Claude Code完成，一份详细的供大模型参考的项目文档说明必不可少，`Dev_AGENTS.md`包含了构建这个项目的所有面向AIGC的文档，可以参考以推广到其他项目的构建上
+
+## V3 — fast / deep 双模式诊断
+
+V3 引入 **双诊断图**：把"日常告警要快"和"重大故障要全"拆成两条独立 LangGraph 流水线，按 `diagnosis_mode` 派发，共享同一套 SSE 事件词表，前端零分叉。
+
+### 两条图
+
+```
+fast 图 (默认, 延迟低)                  deep 图 (证据链完整, 延迟高)
+─────────────────────────               ─────────────────────────────────
+SkillRouter                             IncidentManager      载入诊断对象
+  ↓                                       ↓
+Planner                                 CorrelationContext   同组告警 + Wiki 经验
+  ↓                                       ↓
+Executor ⇄ Replanner                    EvidencePlan        规则路由派哪几个专家
+  ↓                                       ↓ (fan-out 并行)
+Report                                  metric / log / infra / runbook  4 个隔离取证专家
+                                          ↓ (fan-in 归并)
+                                        EvidenceReducer      归并去重 → 候选根因
+                                          ↓
+                                        RCAJudge             LLM 看证据排序定根因
+                                          ↓
+                                        RemediationPlanner   处置建议 (写操作需人工确认)
+                                          ↓
+                                        Report               确定性 Markdown 报告
+```
+
+设计要点：
+
+- **fast 复用既有 Skill-Priority 五步图**，一行没改；deep 是新增的 8 节点确定性编排图，与 fast 并列、互不干扰。
+- **deep 的 4 个专家是隔离的一次性 subagent**（s06 范式）：各自跑最小 LLM+工具循环，只把结论压成一条 `Evidence` 写回共享黑板，不读彼此中间推理，避免多 LLM 无约束互聊。
+- **deep 大量走确定性**：EvidencePlan 按关键词规则路由（不调 LLM）、EvidenceReducer 按证据类型打分归并、RemediationPlanner 按模板出处置、Report 是 Markdown 模板。**全图只有 4 个专家的内部循环 + RCAJudge 一次判断调 LLM**——少错少飘，成本可控。
+- **deep 复用 fast 的 flash/pro 模型分层**（经 `agent_harness` 注册表），不引入新模型档位。
+- **降级容错**：任一专家失败 → 产一条 error-Evidence，不抛、不拖垮全图；RCAJudge 拿不到候选时走 `candidates[0]` 兜底；CorrelationContext 无关联历史时降级为空上下文。所以即便部分数据源不可用，deep 图照样跑完出报告。
+
+### 怎么用
+
+**前端切换**：AIOps 面板顶部新增 `日常 (fast) / 深度 (deep)` 分段开关。选 deep 跑完会额外渲染一条"Deep 取证时间线"（取证计划 / 各专家证据 / 候选根因 / RCA 判定 / 处置建议）。
+
+**API 请求**：`DiagnosisRequest` 加了 `diagnosis_mode` 字段，支持中英文别名（`日常`/`常规`/`daily`→fast，`深度`/`depth`/`group`→deep）：
+
+```bash
+curl -X POST http://localhost:9900/api/v1/aiops/diagnose \
+  -H "Content-Type: application/json" \
+  -d '{"query":"数据库 CPU 100% 持续 30 分钟","diagnosis_mode":"deep"}'
+```
+
+**Alertmanager webhook 自动选模式**：按告警严重度确定性判定——`critical`/`page`/`p0`/`p1` 级，或本次 webhook 携带 ≥10 条告警 → 自动走 deep，其余走 fast。无需人介入。
+
+### 配置
+
+```ini
+# .env
+DEEP_DIAGNOSIS_ENABLED=false   # deep 图总开关。True 才真路由到 deep 图;
+                              # False 时 deep 请求降级回 fast, mode_selected 事件带 group_agent_reserved 标记
+```
+
+默认 `false`：deep 图已验证可编译端到端跑通，但其 `CorrelationContext` 的告警历史回溯依赖尚未接入（会降级为空上下文）。建议本地确认 deep 报告质量后再置 `true` 上线。
+
+### SSE 事件
+
+两图共用同一词表，前端一套渲染逻辑对接。deep 比 fast 多这几类结构化事件（其余 `start`/`plan`/`step_*`/`report`/`complete`/`error` 两图一致）：
+
+| 事件 | 阶段 | 含义 |
+|------|------|------|
+| `mode_selected` | `diagnosis_mode` | 最终跑哪个图 + deep 是否被降级 |
+| `evidence_plan` | `evidence_planned` | 派出哪几个取证专家 |
+| `evidence` | `<agent>_evidence` | 某专家产出的一条证据 |
+| `candidates` | `candidates_reduced` | 归并后的候选根因 |
+| `rca` | `rca_judged` | RCA 判定结果 |
+| `remediation` | `remediation_planned` | 处置建议 |
 
 ## V2
 

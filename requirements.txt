@@ -32,7 +32,9 @@ langchain-milvus>=0.3.3,<0.4.0
 # ---------- 本地 Embedding & Reranker ----------
 # BGE 模型本地推理, 替代 DashScope text-embedding-v4 + gte-rerank-v2
 sentence-transformers>=3.0.0
-langchain-huggingface>=0.2.0,<0.3.0
+# langchain-huggingface 1.x 对齐 langchain v1 (要求 langchain-core>=1.2.31).
+# 0.x 系列钉死 langchain-core<1.0, 与 langchain>=1.0 / langchain-core>=1.2 永久冲突, 故升 1.x.
+langchain-huggingface>=1.0.0,<2.0.0
 
 # ---------- RAG Hybrid Search ----------
 # rank_bm25: 纯 Python BM25 实现 (~10KB), 用于 Hybrid Search 的 sparse 路.
@@ -61,4 +63,3 @@ tiktoken>=0.7.0
 PyYAML>=6.0  # SKILL.md frontmatter 解析
 redis>=5.0.0
 celery[redis]>=5.4,<6.0
-rank-bm25

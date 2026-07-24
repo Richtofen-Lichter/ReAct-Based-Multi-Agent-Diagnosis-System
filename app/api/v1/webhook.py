@@ -26,8 +26,30 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.celery_tasks.diagnosis import run_webhook_diagnosis
+from app.incidents.models import DiagnosisMode
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
+
+
+# ============================================================
+# 告警 → 诊断模式 (fast/deep) 确定性选择
+# 与 Mutil-Rag-Agent fork 的 _diagnosis_mode_for 对齐:
+#   critical / page / p0 / p1 级, 或本次 webhook 携带 >=10 条告警 → deep;
+#   其余 (warning/info 等) → fast.
+# 真生效仍受 settings.deep_diagnosis_enabled 控制 (resolve_effective_mode 里 gate).
+# ============================================================
+_DEEP_SEVERITIES = {"critical", "page", "p0", "p1"}
+_DEEP_ALERT_COUNT = 10
+
+
+def _diagnosis_mode_for(payload: AlertmanagerPayload, alert: AlertmanagerAlert) -> DiagnosisMode:
+    """按确定性规则选 fast/deep 模式 (critical/page/p0/p1 或 >=10 条告警 -> deep)."""
+    severity = str(alert.labels.get("severity", "")).lower()
+    if severity in _DEEP_SEVERITIES:
+        return DiagnosisMode.DEEP
+    if len(payload.alerts) >= _DEEP_ALERT_COUNT:
+        return DiagnosisMode.DEEP
+    return DiagnosisMode.FAST
 
 
 # ============================================================
@@ -142,7 +164,10 @@ async def alertmanager_webhook(payload: AlertmanagerPayload):
             "fingerprint": fingerprint,
             "startsAt": alert.startsAt,
         }
-        task = run_webhook_diagnosis.delay(query, session_id, alert_meta)
+        diagnosis_mode = _diagnosis_mode_for(payload, alert)
+        task = run_webhook_diagnosis.delay(
+            query, session_id, alert_meta, diagnosis_mode.value
+        )
         triggered.append({"session_id": session_id, "task_id": task.id})
 
     logger.info(

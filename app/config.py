@@ -294,6 +294,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ==================== fast/deep 双诊断模式 ====================
+    # 与 Mutil-Rag-Agent fork 对齐. fast 走已有 Plan-Execute-Replan 图;
+    # deep 走独立的多 Agent 取证图 (阶段 1 已移植 build_deep_graph).
+    # deep_diagnosis_enabled 是"deep 图是否真能跑"的总开关:
+    #   - True: diagnosis_mode=deep 路由到 Deep Diagnosis Graph.
+    #   - False (默认): deep 请求回落到 fast, mode_selected 事件带 group_agent_reserved=True.
+    # 默认 False —— deep 图为移植版, CorrelationContext/IncidentManager 的 Postgres+Wiki
+    # 依赖尚未接入 (会降级为空上下文), 建议本地验证后再置 True 上线.
+    deep_diagnosis_enabled: bool = Field(
+        default=False,
+        description=(
+            "deep 模式是否路由到 Deep Diagnosis Graph. "
+            "True=deep 走独立多 Agent 取证图; False=回落 fast Plan-Execute-Replan. "
+            "关闭时 deep 请求会降级, mode_selected 事件以 group_agent_reserved 标记."
+        ),
+    )
+
     # ==================== 联网搜索 ====================
     # provider 可选: mock (默认, 零依赖) / tavily (生产推荐, 需 API Key) / ddgs (国内不稳)
     web_search_provider: str = Field(
